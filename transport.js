@@ -1,74 +1,58 @@
-const net = require('net');
+const zmq = require('zeromq');
+const EventEmitter = require('events').EventEmitter;
 
-/**
- * Transporter is the underlying network transporter for the raft system
- * It is completely disconnected with core raft protocol
- * The main purpose of the transporter system is simple:
- * 1. to send the data when asked to send
- * 2. emit an event, when it receives the data
- */
-class Transporter extends net.Server {
-  constructor(host, port){
+const config = require('./config');
+
+class Transporter extends EventEmitter{
+
+  constructor(){
     super();
-    this._options = {
-        host,
-        port,
-        exclusive: true
+    this.__peers = {}
+  }
+
+  start(){
+    const self = this;
+    
+    for (let server of config['servers']){
+      let addr = `tcp://${server.ip}:${server.port}`;
+      if(server.name == config['myname']){
+        let socket = zmq.socket('rep');
+        socket.bindSync(addr);
+
+        socket.on('message', function(msg){
+          let [topic, message] = JSON.parse(msg);
+          self.emit(topic, message);
+        })
+
+      }
+      else{
+        let socket = zmq.socket('req');
+        self.__peers[addr] = {
+          socket,
+          name: server.name,
+          connected: false          
+        };
+        
+        socket.on('connect', function(fd, ep) {
+          self.__peers[addr]['connected'] = true;
+        });
+        socket.on('connect_delay', function(fd, ep) {
+          self.__peers[addr]['connected'] = false;
+        });
+        socket.on('connect_retry', function(fd, ep) {
+          self.__peers[addr]['connected'] = false;
+        });
+        socket.monitor(100, 0);
+        socket.connect(addr);
+      }
+    }    
+  }
+
+  send(topic, msg){
+    const self = this;
+    const peers = self.__peers;
+    for (let addr in peers){
+      if (peers[addr]['connected']) peers[addr]['socket'].send(JSON.stringify([topic, msg]));
     }
-    this._sockets = {};
-    this._name = "myserver";
-  }
-
-  start (){
-    const server = this;
-    server.listen(server._options);
-
-    server.on('error', (err)=>{
-      //do nothing
-      console.log("Error occured");
-    })
-
-    server.on('close', ()=>{
-
-    })
-
-    server.on('listening', ()=>{
-      console.log(`server listening on ${server._options.port}`);
-    })
-
-    server.on('connection', (socket)=>{
-      console.log("Connection accepted by " + this._name);
-      server._sockets[socket] = {};
-
-      socket.on('close', onSocketClose);
-      socket.on('error', onSocketError);
-      socket.on('data', onSocketData);
-    })
-  }
-
-  send(message){
-    const server = this;
-    for(let socket in server._sockets){
-      socket.write(message, 'utf8')
-    }
   }
 }
-
-function onSocketClose(){
-  console.log("Socket closed");
-}
-
-function onSocketError(err){
-  console.log("Error occured");
-}
-
-function onSocketData(data){
-  console.log(data.toString());
-}
-
-const myport = parseInt(process.argv[2]);
-const yourport = parseInt(process.argv[3]);
-
-const t1 = new Transporter('localhost', myport);
-t1.start();
-
